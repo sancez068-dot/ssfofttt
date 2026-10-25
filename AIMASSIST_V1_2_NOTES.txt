@@ -1,0 +1,20 @@
+KM14 AIM ASSIST V1.2 — TROUBLESHOOTING
+
+What changed
+- Assist no longer skips the whole command because the original CreateMove return value is zero.
+- Recoil control remains OFF.
+- Strict visibility check remains: TraceRay hit entity must equal candidate entity.
+- Adds CREATE_MOVE_CALL, TRACE_RESULT (first 8 traces), and throttled ASSIST_SKIP logs.
+
+Build
+Upload the extracted project contents to GitHub and run Actions -> Build KM14 Control Panel + Native. Install the newly built APK if changed, and load the new liblogger.so using the same loader. Do not load old and new native libraries together; both would hook CreateMove.
+
+Read logger.log
+- No CREATE_MOVE_CALL: hook did not run / different library loaded / hook failed.
+- CREATE_MOVE_CALL but ASSIST_SKIP reason=not_in_game: engine says the game is not active.
+- TRACE_RESULT hit_equals_target=0 for all results: trace layout / hit entity pointer does not match the assumptions. Wall visibility is intentionally fail-closed.
+- FRAME scanned=0: candidate entity/class/team/health fields are not matching.
+- FRAME visible=0 blocked>0: candidates are being rejected by occlusion.
+- FRAME selected>=1 but angles unchanged: inspect aim flag and calculated delta.
+
+Do not weaken the strict visibility rule to accept fraction≈1; that can cause aiming through walls.

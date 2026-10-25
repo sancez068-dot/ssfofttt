@@ -2,6 +2,19 @@
 
 This project builds an Android APK with a **movable, collapsible floating overlay** and the ARM64 native module `liblogger.so` in one ZIP artifact. The launcher activity is only used to request Android's “Display over other apps” permission; the actual controls appear as a floating window above the game.
 
+## Aim-assist fix V1.2 (diagnostic build)
+
+This update removes a faulty gate that only ran the aim routine when the original `CreateMove` returned nonzero. The routine now runs for every hooked call with a non-null command, while preserving the original return value. Recoil compensation remains disabled. The visibility rule is intentionally strict: a target is accepted only when the trace result's hit entity equals the candidate entity; a trace fraction alone never enables aiming.
+
+New log records in `logger.log`:
+
+- `CREATE_MOVE_CALL` — proves the hook is called and shows the original return value, command pointer, interface readiness and in-game state.
+- `TRACE_RESULT` — first eight trace results, including fraction and whether the hit pointer equals the candidate. If these always show `hit_equals_target=0`, the trace ABI/layout or endpoint needs correction; do not weaken the wall check based on fraction alone.
+- `ASSIST_SKIP` — throttled reason when the routine exits early (not in game, bad local player state, missing trace interface, etc.).
+- `FRAME` / `TARGET_SCAN` — scan counts, selected player and changed command angles.
+
+Expected defaults remain speed `9.11`, magnet `0.70`, FOV `11°`; recoil control is off. This patch is source-checked with Clang but still requires the Android GitHub Actions build and an in-game log to confirm the actual runtime path.
+
 ## Overlay behavior
 
 - Draggable by the title area; the compact pill is also draggable.

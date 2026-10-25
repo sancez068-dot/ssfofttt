@@ -1,19 +1,18 @@
 /*
- * KM 1.4 ARM64 — first runtime probe + experimental recoil/head assist.
+ * KM 1.4 ARM64 — aim-assist diagnostics/fix V1.2 (no recoil compensation).
  *
  * Based on the exact libclient.so from the supplied arm64-v8a.zip:
  *   ClientModeShared::CreateMove wrapper: RVA 0x8B0844
  *   CUserCmd viewangles: +0x10, +0x14, +0x18
- *   C_CSPlayer::m_Local: +0x12E8
- *   DT_Local::m_aimPunchAngle: +0xE0
- *   tentative flattened m_aimPunchAngle: +0x13C8
  *   m_iHealth: +0xB8; m_lifeState: +0xB7; m_iTeamNum: +0xC0
  *   m_vecOrigin: +0x430; m_vecViewOffset: +0x124
  *
- * Runtime behavior (v1.1):
- *   - Logs current command angles, local player's punch, and target scan summary.
- *   - Recoil compensation uses the change in m_aimPunchAngle, gated by IN_ATTACK;
- *     it does not subtract the absolute punch continuously while idle.
+ * Runtime behavior (v1.2 diagnostic fix):
+ *   - Calls assist logic after every original CreateMove call with non-null cmd,
+ *     regardless of the original function's bool return value.
+ *   - Logs CreateMove results and the first eight trace outcomes to diagnose why
+ *     targets are selected or rejected. Keeps strict visible-target matching.
+ *   - No recoil compensation.
  *   - Experimental head assist uses speed 9.11, magnet 0.70, FOV 11 degrees;
  *     target point is origin + viewOffset as a head/eye approximation.
  *     It only considers an enemy when EngineTraceClient003 reports a clear trace
@@ -58,8 +57,6 @@
 #define CMD_PITCH_OFF   0x10u
 #define CMD_YAW_OFF     0x14u
 #define CMD_ROLL_OFF    0x18u
-#define CMD_BUTTONS_OFF 0x28u
-#define IN_ATTACK       (1u << 0)
 #define HEALTH_OFF      0xB8u
 #define LIFE_STATE_OFF  0xB7u
 #define TEAM_OFF        0xC0u
@@ -85,6 +82,9 @@ static volatile int g_hook_busy;
 static uint64_t g_last_log_ms;
 static int g_last_target = -1;
 static int g_trace_test_logged;
+static int g_trace_result_logs;
+static uint64_t g_last_hook_log_ms;
+static uint64_t g_last_skip_log_ms;
 static pthread_mutex_t g_config_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_cfg_aim_enabled = 1;
 static float g_cfg_aim_speed = DEFAULT_AIM_SPEED;
@@ -168,6 +168,18 @@ static void log_line(const char *fmt, ...) {
         fclose(fp);
     }
     pthread_mutex_unlock(&g_log_lock);
+}
+
+static void log_skip_throttled(const char *reason, const char *fmt, ...) {
+    uint64_t now = now_ms();
+    if (g_last_skip_log_ms && now - g_last_skip_log_ms < LOG_INTERVAL_MS) return;
+    g_last_skip_log_ms = now;
+    char detail[512] = {0};
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(detail, sizeof(detail), fmt, ap);
+    va_end(ap);
+    log_line("ASSIST_SKIP reason=%s %s", reason, detail);
 }
 
 static int range_mapped(uintptr_t a, size_t n, int write_access) {
@@ -331,15 +343,29 @@ static int trace_visible(void *local, void *target, const float from[3], const f
     memcpy(&hit, tr + 0x58, sizeof(hit));
     if (fraction_out) *fraction_out = fraction;
     if (hit_out) *hit_out = hit;
-    if (!isfinite(fraction) || fraction < 0.0f || fraction > 1.001f) return -1;
-    /* Fail closed: an unobstructed-looking fraction alone is not enough.
-       Aim only if the trace explicitly reports the target entity as the hit. */
-    if (hit == target && fraction > 0.0f && fraction <= 1.001f) return 1;
-    return 0;
+    int valid_fraction = isfinite(fraction) && fraction >= 0.0f && fraction <= 1.001f;
+    int visible = valid_fraction && hit == target && fraction > 0.0f;
+    /* Keep the strict occlusion rule; log early results to expose ABI/layout issues. */
+    if (g_trace_result_logs < 8) {
+        log_line("TRACE_RESULT n=%d target=%p hit=%p fraction=%.5f valid_fraction=%d hit_equals_target=%d visible=%d mask=0x%X fraction_off=0x2C entity_off=0x58",
+            g_trace_result_logs + 1, target, hit, fraction, valid_fraction,
+            hit == target, visible, TRACE_MASK_SHOT);
+        ++g_trace_result_logs;
+    }
+    if (!valid_fraction) return -1;
+    /* Fail closed: a high fraction alone is not proof of visibility. */
+    return visible ? 1 : 0;
 }
 
 static void assist_command(void *cmd, float sample_time) {
-    if (!g_interfaces_ready || !cmd || !g_is_in_game(g_engine_client)) return;
+    if (!g_interfaces_ready) { log_skip_throttled("interfaces_not_ready", "cmd=%p", cmd); return; }
+    if (!cmd) { log_skip_throttled("cmd_null", "sample=%.5f", sample_time); return; }
+    if (!g_engine_client || !g_is_in_game) {
+        log_skip_throttled("engine_state_fn_missing", "engine=%p isInGame=%p", g_engine_client, (void *)g_is_in_game);
+        return;
+    }
+    int in_game = g_is_in_game(g_engine_client);
+    if (!in_game) { log_skip_throttled("not_in_game", "engine=%p", g_engine_client); return; }
     RuntimeConfig cfg = config_snapshot();
     if (!cfg.aim_enabled) {
         uint64_t now = now_ms();
@@ -353,11 +379,15 @@ static void assist_command(void *cmd, float sample_time) {
 
     int local_index = g_get_local_player(g_engine_client);
     int max_clients = g_get_max_clients(g_engine_client);
-    if (local_index < 1 || local_index > MAX_PLAYER_SLOTS) return;
-    if (max_clients < 1) return;
+    if (local_index < 1 || local_index > MAX_PLAYER_SLOTS) {
+        log_skip_throttled("local_index_invalid", "local=%d", local_index); return;
+    }
+    if (max_clients < 1) {
+        log_skip_throttled("max_clients_invalid", "maxClients=%d", max_clients); return;
+    }
     if (max_clients > MAX_PLAYER_SLOTS) max_clients = MAX_PLAYER_SLOTS;
     void *local = g_get_entity(g_entity_list, local_index);
-    if (!local) { log_line("LOCAL_WAIT index=%d entity=null", local_index); return; }
+    if (!local) { log_skip_throttled("local_entity_null", "index=%d", local_index); return; }
 
     int local_health = 0, local_team = 0, local_life = 0;
     float local_origin[3] = {0}, local_view[3] = {0};
@@ -366,7 +396,11 @@ static void assist_command(void *cmd, float sample_time) {
         log_line("LOCAL_REJECT index=%d ptr=%p range_check_failed", local_index, local);
         return;
     }
-    if (local_life != 0 || local_health <= 0 || local_health > 200 || !finite_vec3(local_origin) || !finite_vec3(local_view)) return;
+    if (local_life != 0 || local_health <= 0 || local_health > 200 || !finite_vec3(local_origin) || !finite_vec3(local_view)) {
+        log_skip_throttled("local_state_invalid", "life=%d hp=%d team=%d originFinite=%d viewFinite=%d",
+            local_life, local_health, local_team, finite_vec3(local_origin), finite_vec3(local_view));
+        return;
+    }
 
     float before_pitch = 0.0f, before_yaw = 0.0f, roll = 0.0f;
     memcpy(&before_pitch, (uint8_t *)cmd + CMD_PITCH_OFF, sizeof(float));
@@ -395,6 +429,7 @@ static void assist_command(void *cmd, float sample_time) {
     if (highest >= MAX_ENT_SCAN) highest = MAX_ENT_SCAN - 1;
     if (highest > max_clients + 128) highest = max_clients + 128;
 
+    if (!g_trace_ray) log_skip_throttled("trace_interface_null", "trace=%p engineTrace=%p", (void *)g_trace_ray, g_engine_trace);
     if (g_trace_ray) {
         for (int i = 1; i <= highest; ++i) {
             if (i == local_index || i > max_clients) continue;
@@ -652,7 +687,18 @@ static void write_abs_branch(uint8_t *out, uintptr_t dst) {
 static int create_move_hook(void *self, float sample_time, void *cmd) {
     CreateMoveFn orig = g_original_create_move;
     int result = orig ? orig(self, sample_time, cmd) : 0;
-    if (result && !__sync_lock_test_and_set(&g_hook_busy, 1)) {
+
+    /* The return value describes CreateMove's status, not whether cmd is valid.
+       The previous version incorrectly skipped all assist work when result==0. */
+    uint64_t now = now_ms();
+    if (!g_last_hook_log_ms || now - g_last_hook_log_ms >= LOG_INTERVAL_MS) {
+        int in_game = (g_interfaces_ready && g_engine_client && g_is_in_game)
+            ? g_is_in_game(g_engine_client) : -1;
+        log_line("CREATE_MOVE_CALL result=%d cmd=%p sample=%.5f orig=%p interfaces_ready=%d inGame=%d hook_busy=%d",
+            result, cmd, sample_time, (void *)orig, g_interfaces_ready, in_game, g_hook_busy);
+        g_last_hook_log_ms = now;
+    }
+    if (cmd && !__sync_lock_test_and_set(&g_hook_busy, 1)) {
         assist_command(cmd, sample_time);
         __sync_lock_release(&g_hook_busy);
     }
@@ -700,7 +746,7 @@ static int install_create_move_hook(void) {
         log_line("HOOK_WARN restore_rx errno=%d", errno);
     __sync_synchronize();
     g_hook_installed = 1;
-    log_line("HOOK_OK target=libclient.so+0x8B0844 targetVA=%p trampoline=%p mode=STRICT_VISIBLE_HEAD_ASSIST_NO_RCS",
+    log_line("HOOK_OK target=libclient.so+0x8B0844 targetVA=%p trampoline=%p mode=STRICT_VISIBLE_HEAD_ASSIST_NO_RCS_V1_2",
         target, tramp);
     return 1;
 }
@@ -708,7 +754,7 @@ static int install_create_move_hook(void) {
 static void *worker(void *unused) {
     (void)unused;
     RuntimeConfig c = config_snapshot();
-    log_line("START pid=%ld mode=STRICT_VISIBLE_HEAD_ASSIST_NO_RCS aim=%d radar=%d speed=%.2f magnet=%.2f fov=%.1f controlPort=%d traceMask=0x%X",
+    log_line("START pid=%ld mode=STRICT_VISIBLE_HEAD_ASSIST_NO_RCS_V1_2 aim=%d radar=%d speed=%.2f magnet=%.2f fov=%.1f controlPort=%d traceMask=0x%X",
         (long)getpid(), c.aim_enabled, c.radar_enabled, c.speed, c.magnet, c.fov, CONTROL_PORT, TRACE_MASK_SHOT);
     for (int i = 0; i < 240; ++i) {
         if (resolve_interfaces()) {
