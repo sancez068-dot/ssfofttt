@@ -1,0 +1,25 @@
+KM14 AIM ASSIST V1.6 — TEAM-ONLY TARGET SELECTION
+
+Changes
+- Removes TraceRay visibility gating from target selection. The previous logs showed 1–2 enemy candidates but rejected all due to hit=NULL/fraction=1.0.
+- Selects only live players with valid health whose team is 2 or 3 and differs from the local player's team (m_iTeamNum offset 0xC0).
+- Does not check line of sight; qualifying opposing players can be targeted through walls.
+- No recoil compensation.
+- Uses a fixed head-height approximation: target origin.z + 64 units. It no longer relies on the target view-offset field, which could be zero and pull aim toward the feet.
+- Preserves the floating overlay, radar toggle, local HTTP config API, and Speed/Magnet/FOV sliders.
+
+Defaults
+- Speed: 9.11
+- Magnet: 0.70
+- FOV: 11 degrees
+- Control API: 127.0.0.1:28765
+
+Runtime log checkpoints
+- START mode=TEAM_ONLY_HEAD_ASSIST_NO_RCS_V1_6
+- FRAME ... team=3 ... enemyCandidates=N selected=IDX targetTeam=2 ... targetMode=team_only occlusion=ignored
+- TARGET_SCAN ... pointSource=origin+64 teamRule=enemy_only
+
+Build and validation
+- ARM64-targeted Clang syntax check passed for the aim-assist and radar C sources.
+- Android NDK packaging and live in-game behavior are not verified in this environment. Existing binary offsets and CreateMove hook signature are still specific to the supplied game build.
+- If the log shows enemyCandidates=0 in an actual match, check team/class/entity offsets. If candidates are found but aiming is low, share fresh FRAME and TARGET_SCAN lines; this code logs target height and angle.

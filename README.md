@@ -2,13 +2,15 @@
 
 This project builds an Android APK with a **movable, collapsible floating overlay** and the ARM64 native module `liblogger.so` in one ZIP artifact. The launcher activity is only used to request Android's “Display over other apps” permission; the actual controls appear as a floating window above the game.
 
-## Aim-assist fix V1.4 — TraceRay slot corrected
+## Aim Assist V1.6 — team-only targeting
 
-The supplied runtime log showed `TRACE_RESULT hit=NULL fraction=0.00000` for every candidate while the CreateMove hook and candidate scan were running. V1.3 called `EngineTraceClient003` vtable slot 5 as if it were `TraceRay`; the standard zero-based Valve Source SDK `IEngineTrace` virtual-method order places `TraceRay` at slot 4 and `SetupLeafAndEntityListRay` at slot 5. V1.4 changes the TraceRay index to 4 and logs the three adjacent function pointers with their corrected names.
+V1.5 still depended on `TraceRay` returning the expected target pointer. The supplied runtime log showed enemy candidates were being found (`scanned=1–2`), but each was rejected because the trace result was `hit=NULL` / `fraction=1.0`. V1.6 removes TraceRay from target selection entirely.
 
-The visibility guard remains strict: a candidate is accepted only if the trace's hit entity equals that candidate. No fraction-only fallback is used, so wall blocking is not intentionally weakened. Recoil control remains disabled. Initial defaults are speed `9.11`, magnet `0.70`, and FOV `11°`; the overlay can change them live. The frame log now separates `aimApplied` (whether this frame actually changed a command) from `aimEnabled` (the current settings toggle).
+The target filter is now based on player state and team data: live player, health above zero, team `2` or `3`, and team different from the local player's `m_iTeamNum` at offset `0xC0`. Unassigned/spectator entries and teammates are excluded. Occlusion is not checked, so a qualifying enemy may be targeted through walls.
 
-This slot order follows Valve Source SDK `src/public/engine/IEngineTrace.h` (GetPointContents, GetPointContents_Collideable, ClipRayToEntity, ClipRayToCollideable, TraceRay, SetupLeafAndEntityListRay, ...). The Android target still needs an in-game test; if trace outputs remain zero, inspect the mobile build's `Ray_t` and `CGameTrace` ABI next.
+To avoid aiming at the feet when the target's `m_vecViewOffset` read is zero or implausible, the target height uses a plausible offset clamped to `56–72` units, falling back to `64`. This is a head-height approximation, not a model-bone lookup. Recoil control remains off. Defaults are speed `9.11`, magnet `0.70`, FOV `11°`; the panel continues to control these live.
+
+The source passed ARM64-targeted Clang syntax checks. A full Android NDK build and live in-game test have not been performed here; the actual target offsets remain version-specific.
 
 ## Overlay behavior
 
