@@ -1,5 +1,5 @@
 /*
- * KM 1.4 ARM64 — aim-assist diagnostics/fix V1.2 (no recoil compensation).
+ * KM 1.4 ARM64 — aim-assist V1.3 trace-slot fix (no recoil compensation).
  *
  * Based on the exact libclient.so from the supplied arm64-v8a.zip:
  *   ClientModeShared::CreateMove wrapper: RVA 0x8B0844
@@ -7,7 +7,7 @@
  *   m_iHealth: +0xB8; m_lifeState: +0xB7; m_iTeamNum: +0xC0
  *   m_vecOrigin: +0x430; m_vecViewOffset: +0x124
  *
- * Runtime behavior (v1.2 diagnostic fix):
+ * Runtime behavior (v1.3 trace-slot fix):
  *   - Calls assist logic after every original CreateMove call with non-null cmd,
  *     regardless of the original function's bool return value.
  *   - Logs CreateMove results and the first eight trace outcomes to diagnose why
@@ -70,7 +70,8 @@
 #define DEFAULT_HEAD_FOV_DEG    11.0f
 #define CONTROL_PORT            28765
 #define CONTROL_MAX_REQUEST     8192
-#define TRACE_MASK_SHOT 0x4600400Bu
+#define TRACE_MASK_SHOT 0x46004003u /* Source MASK_SHOT: includes hitboxes */
+#define TRACE_RAY_VTABLE_SLOT 5u /* IEngineTrace: slot 4=ClipRayToCollideable, slot 5=TraceRay */
 
 static pthread_mutex_t g_log_lock = PTHREAD_MUTEX_INITIALIZER;
 static void *g_client_handle, *g_engine_handle;
@@ -228,7 +229,7 @@ static int resolve_interfaces(void) {
     g_get_local_player = (GetLocalPlayerFn)vfunc(g_engine_client, 12);
     g_get_max_clients = (GetMaxClientsFn)vfunc(g_engine_client, 21);
     g_is_in_game = (IsInGameFn)vfunc(g_engine_client, 26);
-    g_trace_ray = g_engine_trace ? (TraceRayFn)vfunc(g_engine_trace, 4) : NULL;
+    g_trace_ray = g_engine_trace ? (TraceRayFn)vfunc(g_engine_trace, TRACE_RAY_VTABLE_SLOT) : NULL;
     if (!g_get_networkable || !g_get_entity || !g_get_highest || !g_get_local_player ||
         !g_get_max_clients || !g_is_in_game) {
         log_line("INTERFACE_FAIL vfunc net=%p ent=%p high=%p local=%p max=%p ingame=%p",
@@ -239,9 +240,10 @@ static int resolve_interfaces(void) {
     Dl_info di; memset(&di, 0, sizeof(di));
     if (dladdr((void *)cf, &di) != 0) g_client_base = (uintptr_t)di.dli_fbase;
     g_interfaces_ready = 1;
-    log_line("INTERFACES_OK base=%p entityList=%p engine=%p trace=%p traceRay=%p rcTrace=%d localSlot=12 entitySlot=3",
+    log_line("INTERFACES_OK base=%p entityList=%p engine=%p trace=%p traceSlot4_clipRayToCollideable=%p traceSlot5_traceRay=%p traceRaySlot=%u rcTrace=%d localSlot=12 entitySlot=3",
         (void *)g_client_base, g_entity_list, g_engine_client, g_engine_trace,
-        (void *)g_trace_ray, e3);
+        g_engine_trace ? vfunc(g_engine_trace, 4) : NULL,
+        (void *)g_trace_ray, TRACE_RAY_VTABLE_SLOT, e3);
     return 1;
 }
 
@@ -331,9 +333,9 @@ static int trace_visible(void *local, void *target, const float from[3], const f
     __attribute__((aligned(16))) uint8_t tr[0x80];
     memset(tr, 0, sizeof(tr));
     if (!g_trace_test_logged) {
-        log_line("TRACE_BEGIN iface=%p traceRay=%p local=%p target=%p start=(%.1f,%.1f,%.1f) end=(%.1f,%.1f,%.1f) raySize=%zu traceSize=%zu",
+        log_line("TRACE_BEGIN iface=%p traceRay=%p local=%p target=%p start=(%.1f,%.1f,%.1f) end=(%.1f,%.1f,%.1f) raySize=%zu traceSize=%zu trace_slot=%u",
             g_engine_trace, (void *)g_trace_ray, local, target, from[0], from[1], from[2],
-            to[0], to[1], to[2], sizeof(ray), sizeof(tr));
+            to[0], to[1], to[2], sizeof(ray), sizeof(tr), TRACE_RAY_VTABLE_SLOT);
     }
     g_trace_ray(g_engine_trace, &ray, TRACE_MASK_SHOT, &filter, tr);
     if (!g_trace_test_logged) { log_line("TRACE_RETURN iface=%p traceRay=%p", g_engine_trace, (void *)g_trace_ray); g_trace_test_logged = 1; }
@@ -347,9 +349,9 @@ static int trace_visible(void *local, void *target, const float from[3], const f
     int visible = valid_fraction && hit == target && fraction > 0.0f;
     /* Keep the strict occlusion rule; log early results to expose ABI/layout issues. */
     if (g_trace_result_logs < 8) {
-        log_line("TRACE_RESULT n=%d target=%p hit=%p fraction=%.5f valid_fraction=%d hit_equals_target=%d visible=%d mask=0x%X fraction_off=0x2C entity_off=0x58",
+        log_line("TRACE_RESULT n=%d target=%p hit=%p fraction=%.5f valid_fraction=%d hit_equals_target=%d visible=%d mask=0x%X trace_slot=%u fraction_off=0x2C entity_off=0x58",
             g_trace_result_logs + 1, target, hit, fraction, valid_fraction,
-            hit == target, visible, TRACE_MASK_SHOT);
+            hit == target, visible, TRACE_MASK_SHOT, TRACE_RAY_VTABLE_SLOT);
         ++g_trace_result_logs;
     }
     if (!valid_fraction) return -1;
@@ -746,7 +748,7 @@ static int install_create_move_hook(void) {
         log_line("HOOK_WARN restore_rx errno=%d", errno);
     __sync_synchronize();
     g_hook_installed = 1;
-    log_line("HOOK_OK target=libclient.so+0x8B0844 targetVA=%p trampoline=%p mode=STRICT_VISIBLE_HEAD_ASSIST_NO_RCS_V1_2",
+    log_line("HOOK_OK target=libclient.so+0x8B0844 targetVA=%p trampoline=%p mode=STRICT_VISIBLE_HEAD_ASSIST_NO_RCS_V1_3_TRACE_SLOT5",
         target, tramp);
     return 1;
 }
@@ -754,7 +756,7 @@ static int install_create_move_hook(void) {
 static void *worker(void *unused) {
     (void)unused;
     RuntimeConfig c = config_snapshot();
-    log_line("START pid=%ld mode=STRICT_VISIBLE_HEAD_ASSIST_NO_RCS_V1_2 aim=%d radar=%d speed=%.2f magnet=%.2f fov=%.1f controlPort=%d traceMask=0x%X",
+    log_line("START pid=%ld mode=STRICT_VISIBLE_HEAD_ASSIST_NO_RCS_V1_3_TRACE_SLOT5 aim=%d radar=%d speed=%.2f magnet=%.2f fov=%.1f controlPort=%d traceMask=0x%X",
         (long)getpid(), c.aim_enabled, c.radar_enabled, c.speed, c.magnet, c.fov, CONTROL_PORT, TRACE_MASK_SHOT);
     for (int i = 0; i < 240; ++i) {
         if (resolve_interfaces()) {

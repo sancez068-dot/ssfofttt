@@ -1,0 +1,17 @@
+KM 1.4 Aim Assist V1.3 — trace vtable slot correction
+
+Diagnosis from the supplied logger.log:
+- CreateMove hook is installed and called.
+- Native config eventually reports aim_enabled=1.
+- Player scan sometimes finds 1–2 candidate enemies.
+- All logged trace results showed hit=NULL and fraction=1.0; strict visibility gating therefore rejected every candidate.
+
+Fix:
+- The previous build called EngineTraceClient003 vtable slot 4 as if it were TraceRay. In the Source IEngineTrace interface order, slot 4 is ClipRayToCollideable, while TraceRay is slot 5. Passing an ITraceFilter to slot 4 as an ICollideable explains the empty trace result.
+- Updated the call to slot 5 and use the standard Source MASK_SHOT value 0x46004003.
+- Kept the strict visibility check: target is accepted only when the trace hit entity equals the candidate. No fraction-only fallback is used; walls remain a hard reject.
+- Recoil control remains OFF. Aim defaults: speed 9.11, magnet 0.70, FOV 11 degrees.
+
+New INTERFACES_OK log includes slot 4 and slot 5 addresses. TRACE_BEGIN/TRACE_RESULT report trace_slot=5.
+
+This is supported by the conventional Source SDK IEngineTrace vtable ordering, but the actual runtime effect must still be validated against the specific CS:S Mobile build. No live game was run here.

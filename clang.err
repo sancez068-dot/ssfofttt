@@ -1,0 +1,4 @@
+/tmp/km14v13.We8sYC/app/src/main/cpp/km14_aimassist_v1.c:46:2: error: "KM14 aim assist probe is ARM64-only"
+   46 | #error "KM14 aim assist probe is ARM64-only"
+      |  ^
+1 error generated.
