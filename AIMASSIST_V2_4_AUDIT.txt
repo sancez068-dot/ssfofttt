@@ -1,0 +1,16 @@
+KM14 V2.4 — FOV and distance configuration update
+
+Source-derived change summary:
+- Removed the misleading local variable name `distance` from head-bone validation; it is now `bone_offset_len`.
+- The remaining 8..180-unit validation checks the head bone's offset from the target entity origin. It does not measure local-player-to-target distance.
+- No local-to-target distance cap is present in the target-selection loop.
+- Native config FOV clamp expanded from 1..45 degrees to 1..360 degrees.
+- Panel slider range expanded to 1.0..360.0 degrees in 0.1-degree increments.
+- V2.3 visibility and performance logic otherwise unchanged.
+
+Build behavior:
+- Push builds only KM14-Native-Update.
+- Manual workflow dispatch with build_panel=true additionally builds KM14-Panel-APK-FOV360.
+
+Validation caveat:
+- No live game test or Android NDK build was run here.

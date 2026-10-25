@@ -1,10 +1,10 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(km14runtime C)
 
-add_library(logger SHARED
-    km14_aimassist_v1.c
-    km14_spotted_flag.c
-)
+# One C translation unit contains both aim-assist and spotted-flag radar.
+# The output filename matches the native library referenced by the current panel APK.
+add_library(logger SHARED km14_combined_v2_4.c)
+set_target_properties(logger PROPERTIES OUTPUT_NAME "lol")
 
 target_compile_options(logger PRIVATE
     -Wall -Wextra

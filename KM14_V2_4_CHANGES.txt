@@ -1,0 +1,9 @@
+KM14 V2.4 changes
+
+1. Removed any ambiguity about distance validation: no local-to-target distance cap exists. The 8..180 check validates head-bone offset relative to target origin only.
+2. Native FOV clamp is now 1..360 degrees.
+3. Panel slider range is 1.0..360.0 degrees in 0.1-degree steps.
+4. Workflow keeps native-only builds on push; optional one-time APK build via manual workflow_dispatch input build_panel=true.
+5. Visibility checks and V2.3 performance logic otherwise unchanged.
+
+Not tested in live game.

@@ -210,7 +210,7 @@ public final class OverlayService extends Service {
         settings.addView(sectionTitle("НАСТРОЙКИ НАВЕДЕНИЯ"), margins(0, 0, 0, 8));
         speedSeek = addSlider(settings, "Скорость", "9.11", 2990, 901, 0);
         magnetSeek = addSlider(settings, "Магнит", "0.70", 100, 70, 1);
-        fovSeek = addSlider(settings, "FOV", "11.0°", 440, 100, 2);
+        fovSeek = addSlider(settings, "FOV", "11.0°", 3590, 100, 2);
         content.addView(settings, new LinearLayout.LayoutParams(-1, -2));
 
         TextView footer = text("Перетаскивай за заголовок. Изменения применяются сразу при подключённой нативке.", 10, false, MUTED);
@@ -495,7 +495,7 @@ public final class OverlayService extends Service {
             float fov = (float) state.optDouble("fov", 11.0);
             speedSeek.setProgress(clamp(Math.round((speed - 0.10f) * 100.0f), 0, 2990));
             magnetSeek.setProgress(clamp(Math.round(magnet * 100.0f), 0, 100));
-            fovSeek.setProgress(clamp(Math.round((fov - 1.0f) * 10.0f), 0, 440));
+            fovSeek.setProgress(clamp(Math.round((fov - 1.0f) * 10.0f), 0, 3590));
         } finally {
             applyingRemote = false;
         }

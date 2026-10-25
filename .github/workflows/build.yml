@@ -2,6 +2,12 @@ name: Build KM14 Native Update
 
 on:
   workflow_dispatch:
+    inputs:
+      build_panel:
+        description: "Build updated panel APK (needed only for the 1–360 FOV slider UI)"
+        required: true
+        type: boolean
+        default: false
   push:
     branches: [main, master]
 
@@ -43,17 +49,43 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          test -s build-native/liblogger.so
-          cp build-native/liblogger.so dist/liblogger.so
+          test -s build-native/liblol.so
+          cp build-native/liblol.so dist/liblol.so
+          cp build-native/liblol.so dist/liblogger.so
           cp README_NATIVE_UPDATE.txt dist/README.txt
-          (cd dist && sha256sum liblogger.so > SHA256SUMS)
-          (cd dist && zip -9 KM14-Native-Update.zip liblogger.so README.txt SHA256SUMS)
-          ls -lh dist/KM14-Native-Update.zip dist/liblogger.so
+          (cd dist && sha256sum liblol.so liblogger.so > SHA256SUMS)
+          (cd dist && zip -9 KM14-Native-Update.zip liblol.so liblogger.so README.txt SHA256SUMS)
+          ls -lh dist/KM14-Native-Update.zip dist/liblol.so dist/liblogger.so
 
       - name: Upload native-only artifact
         uses: actions/upload-artifact@v4
         with:
           name: KM14-Native-Update
           path: dist/KM14-Native-Update.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  build-panel:
+    if: github.event_name == 'workflow_dispatch' && inputs.build_panel == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Build updated panel APK
+        run: gradle --no-daemon assembleDebug
+      - name: Upload updated panel APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: KM14-Panel-APK-FOV360
+          path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 30

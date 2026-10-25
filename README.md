@@ -1,25 +1,16 @@
-# KM14 Native Update — V1.7
+# KM14 V2.4 — unlimited target distance + FOV 1–360
 
-This project keeps the existing floating panel APK unchanged. The GitHub Actions workflow builds **only** the ARM64 native library update artifact; it does not publish a replacement panel APK.
+## Changes
+- No local-player-to-target distance cap is applied. The remaining `bone_offset_len` range check validates the head bone's offset from the target origin only; it is not a range limit.
+- Native `/config` accepts FOV from 1 to 360 degrees.
+- Panel FOV slider source now covers 1.0–360.0 degrees at 0.1-degree steps.
+- Existing native-only workflow remains the default. The panel APK is built only if the workflow is manually dispatched with `build_panel=true`.
+- Aim visibility checks and performance logic are otherwise preserved from V2.3.
 
-## V1.7 changes
+## Build / deploy
+1. Push this project to GitHub. Normal push builds only `KM14-Native-Update.zip`.
+2. Because the slider range is part of the Android panel UI, run Actions -> Build KM14 Native Update -> Run workflow and set `build_panel=true` once. Download `KM14-Panel-APK-FOV360` and install that APK.
+3. Future native changes can continue using the normal native-only artifact without rebuilding the panel.
 
-- Enemy-only targeting: live players on team 2/3 and on the opposite team from the local player.
-- Line-of-sight gate restored using `EngineTraceClient003` and its `TraceRay` slot 4. Candidates blocked by a wall are rejected. A missing trace interface prevents aim-hook activation instead of silently allowing targets through walls.
-- Aim speed now controls the response at every angle error, rather than only capping larger angular steps. Magnet controls response strength. Angular step is capped to avoid the old 25-degree write guard silently dropping high-speed updates.
-- Recoil control remains off. Target point remains an approximate head-height point (`origin + 64`), not a verified model-bone position.
-- Panel protocol remains `127.0.0.1:28765`; panel Java files and UI protocol are unchanged.
-
-## Build and install flow
-
-1. Keep the already installed `KM14-Control-Panel.apk`. **Do not reinstall or redownload it for native-only updates.**
-2. Commit this project to the existing GitHub repository. Each push runs the `Build KM14 Native Update` workflow.
-3. Download the `KM14-Native-Update` Actions artifact. It contains `liblogger.so`, its SHA-256 checksum, and this update note.
-4. Stop the game and your existing loader, replace the old `liblogger.so` at the exact location your loader uses, then launch the game and load the new library. Do not load both versions in the same game process.
-5. Open the already installed floating panel. It continues to send settings to the native library at `127.0.0.1:28765`.
-
-The panel APK contains an older build of the library as a packaged resource, but your existing loader runs the separate `liblogger.so` in the game process. Replacing only the external `.so` is the correct update path for this architecture.
-
-## Validation note
-
-The C source passes local Clang syntax checks. A full Android NDK build or in-game test is not available in this environment. The visibility trace depends on this game build's `Ray_t` / `CGameTrace` ABI and must be confirmed from the runtime log. V1.7 writes `TRACE_RESULT` records including fraction, target hit, clear ray, and solid-start flags.
+## Validation
+Source changes are syntactic; no live game test was performed here. FOV 360 means the angular filter admits all directions, but visibility checks still reject occluded targets.
