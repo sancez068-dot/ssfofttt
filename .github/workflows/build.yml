@@ -1,13 +1,7 @@
-name: Build KM14 Native Update
+name: Build KM14 Panel APK Only
 
 on:
   workflow_dispatch:
-    inputs:
-      build_panel:
-        description: "Build updated panel APK (needed only for the 1–360 FOV slider UI)"
-        required: true
-        type: boolean
-        default: false
   push:
     branches: [main, master]
 
@@ -15,77 +9,43 @@ permissions:
   contents: read
 
 jobs:
-  build-native:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
-
-      - name: Install NDK and CMake
-        run: |
-          sdkmanager \
-            "platform-tools" \
-            "ndk;27.2.12479018" \
-            "cmake;3.22.1"
-
-      - name: Build ARM64 native library only
-        shell: bash
-        run: |
-          set -euo pipefail
-          NDK="$ANDROID_HOME/ndk/27.2.12479018"
-          cmake -S app/src/main/cpp -B build-native -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-23 \
-            -DANDROID_STL=none \
-            -DCMAKE_BUILD_TYPE=Release
-          cmake --build build-native --target logger --parallel 2
-
-      - name: Package native-only update
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          test -s build-native/liblol.so
-          cp build-native/liblol.so dist/liblol.so
-          cp build-native/liblol.so dist/liblogger.so
-          cp README_NATIVE_UPDATE.txt dist/README.txt
-          (cd dist && sha256sum liblol.so liblogger.so > SHA256SUMS)
-          (cd dist && zip -9 KM14-Native-Update.zip liblol.so liblogger.so README.txt SHA256SUMS)
-          ls -lh dist/KM14-Native-Update.zip dist/liblol.so dist/liblogger.so
-
-      - name: Upload native-only artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: KM14-Native-Update
-          path: dist/KM14-Native-Update.zip
-          if-no-files-found: error
-          retention-days: 30
-
   build-panel:
-    if: github.event_name == 'workflow_dispatch' && inputs.build_panel == true
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout source
         uses: actions/checkout@v4
-      - name: Set up Java
+
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - name: Set up Gradle
+
+      - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Build updated panel APK
-        run: gradle --no-daemon assembleDebug
-      - name: Upload updated panel APK
+
+      - name: Build panel APK without native code
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Remove leftover native inputs, if this archive is overlaid on an older project.
+          find app/src/main -type f \
+            \( -name '*.so' -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' \) \
+            -print -delete
+          gradle --no-daemon clean assembleDebug
+          APK='app/build/outputs/apk/debug/app-debug.apk'
+          test -f "$APK"
+          if unzip -Z1 "$APK" | grep -E '\.so$'; then
+            echo 'ERROR: APK unexpectedly contains a native .so library.'
+            exit 1
+          fi
+
+      - name: Upload panel APK
         uses: actions/upload-artifact@v4
         with:
-          name: KM14-Panel-APK-FOV360
+          name: KM14-Panel-APK-Only
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 30
