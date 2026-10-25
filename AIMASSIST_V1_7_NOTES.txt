@@ -1,0 +1,10 @@
+KM14 Aim Assist V1.7
+
+1. Target filter: alive player entity, team 2/3, team != local team.
+2. Visibility: EngineTraceClient003, TraceRay vtable slot 4 (interface method order: GetPointContents, GetPointContents_Collideable, ClipRayToEntity, ClipRayToCollideable, TraceRay).
+3. A candidate is accepted only if the trace hits the target, or the ray is essentially unobstructed (fraction >= 0.99999 and neither allsolid nor startsolid). Invalid/missing trace blocks aim.
+4. Smoothing: alpha = (1 - exp(-speed * sample_time * 12)) * magnet, clamped to [0,1]; angular step capped to 22 degrees per call. Speed now affects small and large errors.
+5. Recoil control off. Approximate head point origin + 64.
+6. Panel UI unchanged; update only liblogger.so from KM14-Native-Update artifact.
+
+Runtime diagnostics: TRACE_RESULT, FRAME, TARGET_SCAN, TRACE_UNAVAILABLE, WRITE_SKIP.

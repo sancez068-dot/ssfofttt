@@ -1,62 +1,25 @@
-# KM14 Floating Overlay — GitHub Actions project
+# KM14 Native Update — V1.7
 
-This project builds an Android APK with a **movable, collapsible floating overlay** and the ARM64 native module `liblogger.so` in one ZIP artifact. The launcher activity is only used to request Android's “Display over other apps” permission; the actual controls appear as a floating window above the game.
+This project keeps the existing floating panel APK unchanged. The GitHub Actions workflow builds **only** the ARM64 native library update artifact; it does not publish a replacement panel APK.
 
-## Aim Assist V1.6 — team-only targeting
+## V1.7 changes
 
-V1.5 still depended on `TraceRay` returning the expected target pointer. The supplied runtime log showed enemy candidates were being found (`scanned=1–2`), but each was rejected because the trace result was `hit=NULL` / `fraction=1.0`. V1.6 removes TraceRay from target selection entirely.
+- Enemy-only targeting: live players on team 2/3 and on the opposite team from the local player.
+- Line-of-sight gate restored using `EngineTraceClient003` and its `TraceRay` slot 4. Candidates blocked by a wall are rejected. A missing trace interface prevents aim-hook activation instead of silently allowing targets through walls.
+- Aim speed now controls the response at every angle error, rather than only capping larger angular steps. Magnet controls response strength. Angular step is capped to avoid the old 25-degree write guard silently dropping high-speed updates.
+- Recoil control remains off. Target point remains an approximate head-height point (`origin + 64`), not a verified model-bone position.
+- Panel protocol remains `127.0.0.1:28765`; panel Java files and UI protocol are unchanged.
 
-The target filter is now based on player state and team data: live player, health above zero, team `2` or `3`, and team different from the local player's `m_iTeamNum` at offset `0xC0`. Unassigned/spectator entries and teammates are excluded. Occlusion is not checked, so a qualifying enemy may be targeted through walls.
+## Build and install flow
 
-To avoid aiming at the feet when the target's `m_vecViewOffset` read is zero or implausible, the target height uses a plausible offset clamped to `56–72` units, falling back to `64`. This is a head-height approximation, not a model-bone lookup. Recoil control remains off. Defaults are speed `9.11`, magnet `0.70`, FOV `11°`; the panel continues to control these live.
+1. Keep the already installed `KM14-Control-Panel.apk`. **Do not reinstall or redownload it for native-only updates.**
+2. Commit this project to the existing GitHub repository. Each push runs the `Build KM14 Native Update` workflow.
+3. Download the `KM14-Native-Update` Actions artifact. It contains `liblogger.so`, its SHA-256 checksum, and this update note.
+4. Stop the game and your existing loader, replace the old `liblogger.so` at the exact location your loader uses, then launch the game and load the new library. Do not load both versions in the same game process.
+5. Open the already installed floating panel. It continues to send settings to the native library at `127.0.0.1:28765`.
 
-The source passed ARM64-targeted Clang syntax checks. A full Android NDK build and live in-game test have not been performed here; the actual target offsets remain version-specific.
+The panel APK contains an older build of the library as a packaged resource, but your existing loader runs the separate `liblogger.so` in the game process. Replacing only the external `.so` is the correct update path for this architecture.
 
-## Overlay behavior
+## Validation note
 
-- Draggable by the title area; the compact pill is also draggable.
-- `−` collapses the panel into a small `KM14` pill. Tap the pill to expand it.
-- `×` stops the overlay service; reopen the app to start it again.
-- Aim Assist and Radar switches, and Speed / Magnet / FOV sliders.
-- Sends changes immediately to `http://127.0.0.1:28765/config` and reads the live state from `/state`.
-- The overlay service is a foreground service so Android is less likely to stop it while the game is active.
-
-## Included outputs
-
-The workflow packages:
-
-- `KM14-Control-Panel.apk` — floating overlay APK.
-- `liblogger.so` — ARM64 native library built into the APK.
-- `README.md` — this file.
-
-The ZIP artifact is named `KM14-Control-Panel-Bundle.zip`.
-
-## Build with GitHub Actions
-
-1. Extract this ZIP locally/Termux.
-2. Upload the **contents** of the extracted project directory to the repository root. Preserve `.github/workflows/build.yml`.
-3. Open **Actions → Build KM14 Control Panel + Native → Run workflow** (or push to `main` / `master`).
-4. Download the `KM14-Control-Panel-Bundle` artifact.
-
-The workflow uses JDK 17, Gradle 8.9, Android SDK 35, NDK `27.2.12479018`, and CMake `3.22.1`.
-
-## First launch
-
-1. Install `KM14-Control-Panel.apk`.
-2. Open it once and allow **Display over other apps** in Android settings.
-3. The Activity closes and the floating overlay appears. You can move it by dragging the title, collapse it with `−`, and reopen it by tapping the `KM14` pill.
-4. Load `liblogger.so` in the game's process with the loader already used for KM 1.4. The panel's status should change to `NATIVE CONNECTED` when the native listener is ready on `127.0.0.1:28765`.
-
-The APK does **not** inject the `.so` into the game. The library must already be loaded in the target process by the user's existing loader.
-
-## Native control API
-
-- `GET /state`
-- `GET /health`
-- `POST /config` with JSON fields `aim_enabled`, `radar_enabled`, `speed`, `magnet`, `fov`.
-
-The native listener is designed to bind only to loopback. The APK uses the same device's `127.0.0.1` endpoint. If the status remains disconnected, check `logger.log` for `CONTROL_LISTEN_OK` / `CONTROL_BIND_FAIL` and ensure only one copy of the native module is loaded.
-
-## Verification note
-
-This ZIP is prepared for the repository's GitHub Actions build. A full Android SDK/NDK build and live overlay test have not been run in this environment. Exact KM 1.4 binary offsets remain version-specific.
+The C source passes local Clang syntax checks. A full Android NDK build or in-game test is not available in this environment. The visibility trace depends on this game build's `Ray_t` / `CGameTrace` ABI and must be confirmed from the runtime log. V1.7 writes `TRACE_RESULT` records including fraction, target hit, clear ray, and solid-start flags.

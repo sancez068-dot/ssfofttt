@@ -1,13 +1,13 @@
 /*
- * KM 1.4 ARM64 — Aim Assist V1.6, team-only target selection.
+ * KM 1.4 ARM64 — Aim Assist V1.7, visible enemy targeting and speed-responsive smoothing.
  *
  * Preserves the existing floating-panel configuration API and radar module.
- * Targets only live opposing-team players (team 2/3, different from local team).
- * The old TraceRay visibility gate is removed because its ABI/result layout was
- * unverified and it rejected all candidates. No recoil compensation is applied.
- * Target point uses a plausible view offset, clamped to head height, with a 64-unit
- * fallback to avoid aiming at the feet when the offset read is zero or implausible.
- * The target point is an approximation, not a model-bone lookup.
+ * Targets only live visible opposing-team players (team 2/3, different from local team).
+ * Uses EngineTraceClient003 TraceRay (slot 4 for this interface order) and a fail-closed
+ * line-of-sight check. No recoil compensation is applied.
+ * Target point uses origin + 64 units as a head-height approximation, not a model-bone lookup.
+ * Speed affects per-frame interpolation at every error size; the applied angular step is capped
+ * below the write guard.
  *
  * Hook is installed only if the first four ARM64 instructions at the target RVA match.
  * Keep the generated library name unique; do not load two hooks at the same RVA.
@@ -41,9 +41,9 @@
 #define RTLD_NOLOAD 0x00004
 #endif
 
-#define TAG "KM14AimV1"
+#define TAG "KM14AimV17"
 #define LOG_PATH "/storage/emulated/0/alrm/mod/logger.log"
-#define FALLBACK_LOG_PATH "/data/user/0/com.valvesoftware.source.client/files/km14_aimassist_v1.log"
+#define FALLBACK_LOG_PATH "/data/user/0/com.valvesoftware.source.client/files/km14_aimassist_v1_7.log"
 #define CREATE_MOVE_RVA ((uintptr_t)0x8B0844u)
 #define CMD_PITCH_OFF   0x10u
 #define CMD_YAW_OFF     0x14u
@@ -61,10 +61,12 @@
 #define DEFAULT_HEAD_FOV_DEG    11.0f
 #define CONTROL_PORT            28765
 #define CONTROL_MAX_REQUEST     8192
+#define TRACE_MASK_SHOT         0x4600400Bu
+#define TRACE_RAY_VTABLE_SLOT   4u
 
 static pthread_mutex_t g_log_lock = PTHREAD_MUTEX_INITIALIZER;
 static void *g_client_handle, *g_engine_handle;
-static void *g_entity_list, *g_engine_client;
+static void *g_entity_list, *g_engine_client, *g_engine_trace;
 static uintptr_t g_client_base;
 static volatile int g_interfaces_ready;
 static volatile int g_hook_installed;
@@ -80,6 +82,7 @@ static float g_cfg_aim_magnet = DEFAULT_AIM_MAGNET;
 static float g_cfg_head_fov = DEFAULT_HEAD_FOV_DEG;
 static pthread_t g_control_thread;
 static volatile int g_control_started;
+static unsigned g_trace_result_logs;
 
 extern void km14_set_radar_enabled(int enabled);
 extern int km14_get_radar_enabled(void);
@@ -114,6 +117,7 @@ typedef int (*GetMaxClientsFn)(void *);
 typedef int (*IsInGameFn)(void *);
 typedef void *(*GetClientClassFn)(void *);
 typedef int (*CreateMoveFn)(void *, float, void *);
+typedef void (*TraceRayFn)(void *, const void *, unsigned int, void *, void *);
 
 static GetClientEntityFn g_get_entity;
 static GetClientNetworkableFn g_get_networkable;
@@ -121,6 +125,7 @@ static GetHighestEntityIndexFn g_get_highest;
 static GetLocalPlayerFn g_get_local_player;
 static GetMaxClientsFn g_get_max_clients;
 static IsInGameFn g_is_in_game;
+static TraceRayFn g_trace_ray;
 static CreateMoveFn g_original_create_move;
 
 static uint64_t now_ms(void) {
@@ -200,11 +205,13 @@ static int resolve_interfaces(void) {
     CreateInterfaceFn ef = (CreateInterfaceFn)dlsym(g_engine_handle, "CreateInterface");
     if (!cf || !ef) { log_line("INTERFACE_FAIL factory client=%p engine=%p", (void *)cf, (void *)ef); return 0; }
     int e1 = -1, e2 = -1;
+    int e3 = -1;
     g_entity_list = cf("VClientEntityList003", &e1);
     g_engine_client = ef("VEngineClient014", &e2);
+    g_engine_trace = ef("EngineTraceClient003", &e3);
     if (!g_entity_list || !g_engine_client) {
-        log_line("INTERFACE_WAIT entityList=%p rc=%d engine=%p rc=%d",
-            g_entity_list, e1, g_engine_client, e2);
+        log_line("INTERFACE_WAIT entityList=%p rc=%d engine=%p rc=%d trace=%p rc=%d",
+            g_entity_list, e1, g_engine_client, e2, g_engine_trace, e3);
         return 0;
     }
     g_get_networkable = (GetClientNetworkableFn)vfunc(g_entity_list, 0);
@@ -213,6 +220,8 @@ static int resolve_interfaces(void) {
     g_get_local_player = (GetLocalPlayerFn)vfunc(g_engine_client, 12);
     g_get_max_clients = (GetMaxClientsFn)vfunc(g_engine_client, 21);
     g_is_in_game = (IsInGameFn)vfunc(g_engine_client, 26);
+    /* EngineTraceClient003 follows the Source interface order: TraceRay is slot 4. */
+    g_trace_ray = g_engine_trace ? (TraceRayFn)vfunc(g_engine_trace, TRACE_RAY_VTABLE_SLOT) : NULL;
     if (!g_get_networkable || !g_get_entity || !g_get_highest || !g_get_local_player ||
         !g_get_max_clients || !g_is_in_game) {
         log_line("INTERFACE_FAIL vfunc net=%p ent=%p high=%p local=%p max=%p ingame=%p",
@@ -220,11 +229,17 @@ static int resolve_interfaces(void) {
             (void *)g_get_local_player, (void *)g_get_max_clients, (void *)g_is_in_game);
         return 0;
     }
+    if (!g_engine_trace || !g_trace_ray) {
+        log_line("INTERFACE_WAIT trace=%p traceRay=%p slot=%u rcTrace=%d",
+            g_engine_trace, (void *)g_trace_ray, TRACE_RAY_VTABLE_SLOT, e3);
+        return 0;
+    }
     Dl_info di; memset(&di, 0, sizeof(di));
     if (dladdr((void *)cf, &di) != 0) g_client_base = (uintptr_t)di.dli_fbase;
     g_interfaces_ready = 1;
-    log_line("INTERFACES_OK base=%p entityList=%p engine=%p localSlot=12 entitySlot=3 teamOffset=0x%X",
-        (void *)g_client_base, g_entity_list, g_engine_client, TEAM_OFF);
+    log_line("INTERFACES_OK base=%p entityList=%p engine=%p trace=%p traceRay=%p traceSlot=%u localSlot=12 entitySlot=3 teamOffset=0x%X",
+        (void *)g_client_base, g_entity_list, g_engine_client, g_engine_trace,
+        (void *)g_trace_ray, TRACE_RAY_VTABLE_SLOT, TEAM_OFF);
     return 1;
 }
 
@@ -273,8 +288,75 @@ static void calc_angle(const float from[3], const float to[3], float out[2]) {
     out[1] = atan2f(dy, dx) * (180.0f / 3.14159265358979323846f);
 }
 
-/* TraceRay is intentionally not used for candidate selection in V1.6. The mobile
-   interface ABI was not confirmed and the prior strict hit check rejected every enemy. */
+/* Source-style 64-bit Ray_t layout: four 16-byte vectors, transform pointer, flags. */
+typedef struct { float x, y, z, pad; } VecAligned16;
+typedef struct {
+    VecAligned16 start;
+    VecAligned16 delta;
+    VecAligned16 start_offset;
+    VecAligned16 extents;
+    const void *world_axis_transform;
+    uint8_t is_ray;
+    uint8_t is_swept;
+    uint8_t pad[6];
+} Ray_t_KM;
+_Static_assert(sizeof(Ray_t_KM) == 0x50, "Ray_t size mismatch");
+
+typedef int (*ShouldHitEntityFn)(void *, void *, int);
+typedef int (*GetTraceTypeFn)(void *);
+typedef struct { ShouldHitEntityFn should_hit; GetTraceTypeFn get_type; } TraceFilterVTable;
+typedef struct { const TraceFilterVTable *vtable; void *skip_entity; } TraceFilterSimple;
+static int filter_should_hit(void *self, void *entity, int mask) {
+    (void)mask;
+    const TraceFilterSimple *f = (const TraceFilterSimple *)self;
+    return entity != f->skip_entity;
+}
+static int filter_get_type(void *self) { (void)self; return 0; }
+static const TraceFilterVTable g_filter_vtable = { filter_should_hit, filter_get_type };
+
+/* CGameTrace on this Source layout: fraction +0x2C, allsolid +0x36,
+   startsolid +0x37, entity pointer +0x58. */
+static int trace_visible(void *local, void *target, const float from[3], const float to[3],
+                         float *fraction_out, void **hit_out) {
+    if (fraction_out) *fraction_out = -1.0f;
+    if (hit_out) *hit_out = NULL;
+    if (!g_engine_trace || !g_trace_ray) return -1;
+
+    Ray_t_KM ray;
+    memset(&ray, 0, sizeof(ray));
+    ray.start.x = from[0]; ray.start.y = from[1]; ray.start.z = from[2];
+    ray.delta.x = to[0] - from[0]; ray.delta.y = to[1] - from[1]; ray.delta.z = to[2] - from[2];
+    ray.is_ray = 1;
+    ray.is_swept = (fabsf(ray.delta.x) + fabsf(ray.delta.y) + fabsf(ray.delta.z)) > 0.001f;
+    TraceFilterSimple filter = { &g_filter_vtable, local };
+    __attribute__((aligned(16))) uint8_t tr[0x80];
+    memset(tr, 0, sizeof(tr));
+
+    g_trace_ray(g_engine_trace, &ray, TRACE_MASK_SHOT, &filter, tr);
+    float fraction = -1.0f;
+    void *hit = NULL;
+    memcpy(&fraction, tr + 0x2C, sizeof(fraction));
+    memcpy(&hit, tr + 0x58, sizeof(hit));
+    const int allsolid = tr[0x36] != 0;
+    const int startsolid = tr[0x37] != 0;
+    if (fraction_out) *fraction_out = fraction;
+    if (hit_out) *hit_out = hit;
+
+    int valid_fraction = isfinite(fraction) && fraction >= 0.0f && fraction <= 1.001f;
+    /* A target hit is direct proof. Fraction ~= 1 with no solid start means the
+       complete ray was clear even if this client build doesn't expose m_pEnt. */
+    int target_hit = hit == target && fraction > 0.0f;
+    int clear_ray = fraction >= 0.99999f && !allsolid && !startsolid;
+    int visible = valid_fraction && (target_hit || clear_ray);
+    if (g_trace_result_logs < 12) {
+        log_line("TRACE_RESULT n=%u slot=%u target=%p hit=%p fraction=%.5f valid=%d targetHit=%d clearRay=%d startsolid=%d allsolid=%d visible=%d mask=0x%X",
+            g_trace_result_logs + 1, TRACE_RAY_VTABLE_SLOT, target, hit, fraction,
+            valid_fraction, target_hit, clear_ray, startsolid, allsolid, visible, TRACE_MASK_SHOT);
+        ++g_trace_result_logs;
+    }
+    if (!valid_fraction) return -1;
+    return visible ? 1 : 0;
+}
 
 static void assist_command(void *cmd, float sample_time) {
     if (!g_interfaces_ready) { log_skip_throttled("interfaces_not_ready", "cmd=%p", cmd); return; }
@@ -337,6 +419,11 @@ static void assist_command(void *cmd, float sample_time) {
         log_skip_throttled("local_team_invalid", "local=%d team=%d", local_index, local_team);
         return;
     }
+    if (!g_engine_trace || !g_trace_ray) {
+        log_skip_throttled("trace_unavailable", "trace=%p traceRay=%p slot=%u",
+            g_engine_trace, (void *)g_trace_ray, TRACE_RAY_VTABLE_SLOT);
+        return;
+    }
 
     float local_eye[3] = {
         local_origin[0] + local_view[0],
@@ -344,17 +431,15 @@ static void assist_command(void *cmd, float sample_time) {
         local_origin[2] + local_view[2]
     };
     int best_idx = -1, best_team = 0, best_health = 0;
-    void *best_ent = NULL;
-    float best_error = 999.0f;
+    void *best_ent = NULL, *best_hit = NULL;
+    float best_error = 999.0f, best_fraction = -1.0f;
     float best_target[3] = {0}, best_angles[2] = {0};
-    int enemy_candidates = 0;
+    int enemy_candidates = 0, visible_count = 0, blocked_count = 0, invalid_trace_count = 0;
     int highest = g_get_highest(g_entity_list);
     if (highest < 0) highest = 0;
     if (highest >= MAX_ENT_SCAN) highest = MAX_ENT_SCAN - 1;
     if (highest > max_clients + 128) highest = max_clients + 128;
 
-    /* Legacy targeting mode: choose by health/life state and team only.
-       No visibility trace is called; an unverified trace ABI cannot block targets. */
     for (int i = 1; i <= highest; ++i) {
         if (i == local_index || i > max_clients) continue;
         const char *name = entity_class_name(i);
@@ -364,27 +449,30 @@ static void assist_command(void *cmd, float sample_time) {
         int hp = 0, team = 0, life = 0;
         float org[3] = {0}, vo[3] = {0};
         if (!read_entity_data(ent, &hp, &team, &life, org, vo)) continue;
-        /* CS:S teams: 2 and 3. Team 0/1 and teammates are never target candidates. */
         if (life != 0 || hp <= 0 || hp > 200 || team < 2 || team > 3 || team == local_team) continue;
         if (!finite_vec3(org)) continue;
         ++enemy_candidates;
 
-        /* Use a fixed Source-player head/eye height. Target viewOffset was the
-           cause of aiming at the feet when the remote value read as zero. */
-        const float head_offset = 64.0f;
-        float point[3] = { org[0], org[1], org[2] + head_offset };
+        /* Fixed head-height estimate; use the same point for angle and visibility. */
+        float point[3] = { org[0], org[1], org[2] + 64.0f };
         float target_angle[2];
         calc_angle(local_eye, point, target_angle);
-        float dp = clampf_local(normalize_yaw(target_angle[0] - cp), -180.0f, 180.0f);
+        float dp = normalize_yaw(target_angle[0] - cp);
         float dy = normalize_yaw(target_angle[1] - cy);
         float err = sqrtf(dp * dp + dy * dy);
-        if (err > cfg.fov || err >= best_error) continue;
+        if (!isfinite(err) || err > cfg.fov || err >= best_error) continue;
 
-        best_idx = i;
-        best_ent = ent;
-        best_team = team;
-        best_health = hp;
-        best_error = err;
+        float frac = -1.0f;
+        void *hit = NULL;
+        int vis = trace_visible(local, ent, local_eye, point, &frac, &hit);
+        if (vis != 1) {
+            if (vis == 0) ++blocked_count;
+            else ++invalid_trace_count;
+            continue;
+        }
+        ++visible_count;
+        best_idx = i; best_ent = ent; best_team = team; best_health = hp;
+        best_error = err; best_fraction = frac; best_hit = hit;
         memcpy(best_target, point, sizeof(best_target));
         memcpy(best_angles, target_angle, sizeof(best_angles));
     }
@@ -397,10 +485,12 @@ static void assist_command(void *cmd, float sample_time) {
         float error_deg = sqrtf(dp * dp + dy * dy);
         float dt = (isfinite(sample_time) && sample_time >= 0.001f && sample_time <= 0.1f)
                      ? sample_time : (1.0f / 60.0f);
-        float max_step_deg = cfg.speed * dt * 60.0f;
-        float requested_step_deg = error_deg * cfg.magnet;
-        float step_deg = fminf(requested_step_deg, max_step_deg);
-        float alpha = (error_deg > 0.0001f) ? (step_deg / error_deg) : 0.0f;
+        /* Speed controls every frame, not only large-angle moves. Magnet scales
+           the response; a 22-degree vector cap stays below WRITE_SKIP's 25-degree guard. */
+        float response = 1.0f - expf(-cfg.speed * dt * 12.0f);
+        float alpha = clampf_local(response * cfg.magnet, 0.0f, 1.0f);
+        float step_deg = error_deg * alpha;
+        if (step_deg > 22.0f && error_deg > 0.0001f) alpha = 22.0f / error_deg;
         after_pitch = clampf_local(cp + dp * alpha, -89.0f, 89.0f);
         after_yaw = normalize_yaw(cy + dy * alpha);
         aim_applied = (fabsf(dp) > 0.01f || fabsf(dy) > 0.01f) && alpha > 0.0f;
@@ -422,13 +512,14 @@ static void assist_command(void *cmd, float sample_time) {
 
     uint64_t now = now_ms();
     if (now - g_last_log_ms >= LOG_INTERVAL_MS || best_idx != g_last_target) {
-        log_line("FRAME local=%d hp=%d team=%d cmd=(%.2f,%.2f)->(%.2f,%.2f) enemyCandidates=%d selected=%d targetTeam=%d error=%.2f aimApplied=%d aimEnabled=%d speed=%.2f magnet=%.2f fov=%.1f recoilControl=OFF targetMode=team_only occlusion=ignored",
+        log_line("FRAME local=%d hp=%d team=%d cmd=(%.2f,%.2f)->(%.2f,%.2f) scanned=%d visible=%d blocked=%d invalidTrace=%d selected=%d targetTeam=%d error=%.2f aimApplied=%d aimEnabled=%d speed=%.2f magnet=%.2f fov=%.1f recoilControl=OFF targetMode=visible_enemy occlusion=line_trace",
             local_index, local_health, local_team, before_pitch, before_yaw, after_pitch, after_yaw,
-            enemy_candidates, best_idx, best_team, best_error, aim_applied, cfg.aim_enabled,
-            cfg.speed, cfg.magnet, cfg.fov);
-        log_line("TARGET_SCAN highest=%d maxClients=%d target=%p health=%d team=%d point=(%.1f,%.1f,%.1f) targetAngle=(%.2f,%.2f) pointSource=origin+64 teamRule=enemy_only",
-            highest, max_clients, best_ent, best_health, best_team,
-            best_target[0], best_target[1], best_target[2], best_angles[0], best_angles[1]);
+            enemy_candidates, visible_count, blocked_count, invalid_trace_count, best_idx,
+            best_team, best_error, aim_applied, cfg.aim_enabled, cfg.speed, cfg.magnet, cfg.fov);
+        log_line("TARGET_SCAN highest=%d maxClients=%d trace=%p traceRay=%p target=%p hit=%p fraction=%.4f health=%d team=%d point=(%.1f,%.1f,%.1f) targetAngle=(%.2f,%.2f) pointSource=origin+64 teamRule=enemy_only",
+            highest, max_clients, g_engine_trace, (void *)g_trace_ray, best_ent, best_hit,
+            best_fraction, best_health, best_team, best_target[0], best_target[1], best_target[2],
+            best_angles[0], best_angles[1]);
         g_last_log_ms = now;
         g_last_target = best_idx;
     }
@@ -671,7 +762,7 @@ static int install_create_move_hook(void) {
         log_line("HOOK_WARN restore_rx errno=%d", errno);
     __sync_synchronize();
     g_hook_installed = 1;
-    log_line("HOOK_OK target=libclient.so+0x8B0844 targetVA=%p trampoline=%p mode=TEAM_ONLY_HEAD_ASSIST_NO_RCS_V1_6_NO_TRACE",
+    log_line("HOOK_OK target=libclient.so+0x8B0844 targetVA=%p trampoline=%p mode=VISIBLE_ENEMY_HEAD_ASSIST_V1_7_TRACE_SLOT4",
         target, tramp);
     return 1;
 }
@@ -679,7 +770,7 @@ static int install_create_move_hook(void) {
 static void *worker(void *unused) {
     (void)unused;
     RuntimeConfig c = config_snapshot();
-    log_line("START pid=%ld mode=TEAM_ONLY_HEAD_ASSIST_NO_RCS_V1_6 aim=%d radar=%d speed=%.2f magnet=%.2f fov=%.1f controlPort=%d teamOffset=0x%X",
+    log_line("START pid=%ld mode=VISIBLE_ENEMY_HEAD_ASSIST_V1_7 aim=%d radar=%d speed=%.2f magnet=%.2f fov=%.1f controlPort=%d teamOffset=0x%X",
         (long)getpid(), c.aim_enabled, c.radar_enabled, c.speed, c.magnet, c.fov, CONTROL_PORT, TEAM_OFF);
     for (int i = 0; i < 240; ++i) {
         if (resolve_interfaces()) {
@@ -714,5 +805,5 @@ __attribute__((constructor)) static void on_load(void) {
 }
 
 __attribute__((visibility("default"))) const char *km14_aimassist_version(void) {
-    return "KM14 AimAssist v1.6: enemy-team targeting without trace visibility gate, no RCS, localhost control port 28765";
+    return "KM14 AimAssist v1.7: visible enemy targeting, speed-responsive smoothing, no RCS, localhost control port 28765";
 }
