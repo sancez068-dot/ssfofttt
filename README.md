@@ -1,40 +1,52 @@
-# KM 1.4 Control Panel — source package
+# KM14 Floating Overlay — GitHub Actions project
 
-This repository builds an Android control-panel APK and an ARM64 native shared library. The GitHub Actions workflow packages both outputs into `KM14-Control-Panel-Bundle.zip`.
+This project builds an Android APK with a **movable, collapsible floating overlay** and the ARM64 native module `liblogger.so` in one ZIP artifact. The launcher activity is only used to request Android's “Display over other apps” permission; the actual controls appear as a floating window above the game.
 
-## What is included
+## Overlay behavior
 
-- `KM14-Control-Panel.apk`: panel UI with live toggles and sliders.
-- `liblogger.so`: native module source build, compatible in name with the existing loader workflow.
-- The panel sends settings over HTTP bound only to `127.0.0.1:28765`.
+- Draggable by the title area; the compact pill is also draggable.
+- `−` collapses the panel into a small `KM14` pill. Tap the pill to expand it.
+- `×` stops the overlay service; reopen the app to start it again.
+- Aim Assist and Radar switches, and Speed / Magnet / FOV sliders.
+- Sends changes immediately to `http://127.0.0.1:28765/config` and reads the live state from `/state`.
+- The overlay service is a foreground service so Android is less likely to stop it while the game is active.
 
-Default settings are aim enabled, radar enabled, speed `9.11`, magnet `0.70`, FOV `11.0°`. Recoil control is removed. Runtime ranges: speed `0.10..30.00`, magnet `0.00..1.00`, FOV `1.0..45.0°`.
+## Included outputs
 
-## GitHub build
+The workflow packages:
 
-1. Extract this project ZIP.
-2. Upload the **contents** of the extracted folder to a GitHub repository (the `.github/workflows/build.yml` path must be preserved).
-3. Open **Actions → Build KM14 Control Panel + Native → Run workflow**, or push to `main`/`master`.
-4. Download the artifact named `KM14-Control-Panel-Bundle`. It contains the APK and `liblogger.so` in a single ZIP.
+- `KM14-Control-Panel.apk` — floating overlay APK.
+- `liblogger.so` — ARM64 native library built into the APK.
+- `README.md` — this file.
+
+The ZIP artifact is named `KM14-Control-Panel-Bundle.zip`.
+
+## Build with GitHub Actions
+
+1. Extract this ZIP locally/Termux.
+2. Upload the **contents** of the extracted project directory to the repository root. Preserve `.github/workflows/build.yml`.
+3. Open **Actions → Build KM14 Control Panel + Native → Run workflow** (or push to `main` / `master`).
+4. Download the `KM14-Control-Panel-Bundle` artifact.
 
 The workflow uses JDK 17, Gradle 8.9, Android SDK 35, NDK `27.2.12479018`, and CMake `3.22.1`.
 
-## Runtime connection
+## First launch
 
-The panel app does **not** inject the native library into another process. Load `liblogger.so` into the game using the same loader you already use, then open the panel app. The native library starts the HTTP listener inside the process where it was loaded; the panel connects to `http://127.0.0.1:28765`.
+1. Install `KM14-Control-Panel.apk`.
+2. Open it once and allow **Display over other apps** in Android settings.
+3. The Activity closes and the floating overlay appears. You can move it by dragging the title, collapse it with `−`, and reopen it by tapping the `KM14` pill.
+4. Load `liblogger.so` in the game's process with the loader already used for KM 1.4. The panel's status should change to `NATIVE CONNECTED` when the native listener is ready on `127.0.0.1:28765`.
 
-API:
+The APK does **not** inject the `.so` into the game. The library must already be loaded in the target process by the user's existing loader.
 
-- `GET /state` — current settings.
-- `GET /health` — listener health.
-- `POST /config` — partial or full JSON update, e.g. `{"aim_enabled":true,"radar_enabled":true,"speed":9.11,"magnet":0.70,"fov":11.0}`.
+## Native control API
 
-The listener binds to loopback only, not to the Wi-Fi/LAN interface. If the panel reports no connection, check `logger.log` for `CONTROL_LISTEN_OK` or `CONTROL_BIND_FAIL` and make sure only one copy of the module is loaded.
+- `GET /state`
+- `GET /health`
+- `POST /config` with JSON fields `aim_enabled`, `radar_enabled`, `speed`, `magnet`, `fov`.
 
-## Visibility check
+The native listener is designed to bind only to loopback. The APK uses the same device's `127.0.0.1` endpoint. If the status remains disconnected, check `logger.log` for `CONTROL_LISTEN_OK` / `CONTROL_BIND_FAIL` and ensure only one copy of the native module is loaded.
 
-The aim code uses a fail-closed test: it accepts a target only when the trace reports that exact target entity as the hit. It no longer treats a near-1.0 trace fraction alone as proof of visibility. If the trace result layout/ABI differs in your game build, the safe failure mode is to skip targets; it may therefore need runtime verification for this exact binary.
+## Verification note
 
-## Important verification notes
-
-This is a source package for GitHub Actions; the Android NDK build and live game behavior must be verified by the Actions artifact and runtime log. The target point remains `origin + viewOffset` as an approximation; a true head bone has not been confirmed. The `.so` is ARM64-only and uses offsets from the exact KM 1.4 binary previously analyzed. Do not use it with a different binary without revalidating offsets and hook signatures.
+This ZIP is prepared for the repository's GitHub Actions build. A full Android SDK/NDK build and live overlay test have not been run in this environment. Exact KM 1.4 binary offsets remain version-specific.
