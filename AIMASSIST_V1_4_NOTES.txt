@@ -1,0 +1,15 @@
+KM14 Aim Assist V1.4 — runtime log diagnosis
+
+Root cause from the supplied logger.log:
+- CreateMove hook is installed and called.
+- Candidate player scan finds 1–2 enemies in some frames.
+- Every TRACE_RESULT was hit=NULL, fraction=0.00000, so strict visibility rejected every candidate.
+- V1.3 called vtable slot 5 as TraceRay. In the standard Valve Source SDK IEngineTrace order, zero-based slot 4 is TraceRay and slot 5 is SetupLeafAndEntityListRay. The incorrect call explains the untouched zero-filled trace result.
+
+V1.4 changes:
+- TraceRay slot changed to 4.
+- INTERFACES_OK logs slots 3, 4 and 5 with their corrected names.
+- FRAME log separates aimApplied (whether this frame changed the command) from aimEnabled (the runtime configuration switch).
+- Strict visibility matching remains: no fraction-only fallback. Recoil control remains off.
+
+The interface order is based on Valve's Source SDK IEngineTrace.h (virtual methods GetPointContents, GetPointContents_Collideable, ClipRayToEntity, ClipRayToCollideable, TraceRay, SetupLeafAndEntityListRay, ...). The mobile build still must be runtime-tested; if the returned trace fields remain zero, verify the target build's trace_t and Ray_t ABI next.

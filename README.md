@@ -2,13 +2,13 @@
 
 This project builds an Android APK with a **movable, collapsible floating overlay** and the ARM64 native module `liblogger.so` in one ZIP artifact. The launcher activity is only used to request Android's “Display over other apps” permission; the actual controls appear as a floating window above the game.
 
-## Aim-assist fix V1.3 (trace slot correction)
+## Aim-assist fix V1.4 — TraceRay slot corrected
 
-The supplied runtime log showed that the CreateMove hook was active and target scanning sometimes found candidates, but every logged trace returned `hit=NULL` and `fraction=1.0`. That meant the strict visibility test rejected all candidates. The previous build called `EngineTraceClient003` vtable slot 4 as if it were `TraceRay`; in the conventional Source `IEngineTrace` order, slot 4 is `ClipRayToCollideable` and `TraceRay` is slot 5. V1.3 calls slot 5 and logs both slot addresses. The trace mask is the standard Source `MASK_SHOT` value `0x46004003`.
+The supplied runtime log showed `TRACE_RESULT hit=NULL fraction=0.00000` for every candidate while the CreateMove hook and candidate scan were running. V1.3 called `EngineTraceClient003` vtable slot 5 as if it were `TraceRay`; the standard zero-based Valve Source SDK `IEngineTrace` virtual-method order places `TraceRay` at slot 4 and `SetupLeafAndEntityListRay` at slot 5. V1.4 changes the TraceRay index to 4 and logs the three adjacent function pointers with their corrected names.
 
-The visibility guard remains strict: a candidate is accepted only if the trace's hit entity equals that candidate. There is no fraction-only fallback, so the patch does not intentionally weaken wall blocking. Recoil control stays off. Defaults: speed `9.11`, magnet `0.70`, FOV `11°`.
+The visibility guard remains strict: a candidate is accepted only if the trace's hit entity equals that candidate. No fraction-only fallback is used, so wall blocking is not intentionally weakened. Recoil control remains disabled. Initial defaults are speed `9.11`, magnet `0.70`, and FOV `11°`; the overlay can change them live. The frame log now separates `aimApplied` (whether this frame actually changed a command) from `aimEnabled` (the current settings toggle).
 
-New diagnostic values: `INTERFACES_OK` prints `traceSlot4_clipRayToCollideable`, `traceSlot5_traceRay`, and `traceRaySlot=5`; `TRACE_RESULT` includes `trace_slot=5`. If the runtime interface differs from the conventional Source layout, the next log will make that discrepancy visible. This was not tested live in-game.
+This slot order follows Valve Source SDK `src/public/engine/IEngineTrace.h` (GetPointContents, GetPointContents_Collideable, ClipRayToEntity, ClipRayToCollideable, TraceRay, SetupLeafAndEntityListRay, ...). The Android target still needs an in-game test; if trace outputs remain zero, inspect the mobile build's `Ray_t` and `CGameTrace` ABI next.
 
 ## Overlay behavior
 

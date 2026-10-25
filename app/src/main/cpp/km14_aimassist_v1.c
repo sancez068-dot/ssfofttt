@@ -1,5 +1,5 @@
 /*
- * KM 1.4 ARM64 — aim-assist V1.3 trace-slot fix (no recoil compensation).
+ * KM 1.4 ARM64 — aim-assist V1.4 trace-slot fix (no recoil compensation).
  *
  * Based on the exact libclient.so from the supplied arm64-v8a.zip:
  *   ClientModeShared::CreateMove wrapper: RVA 0x8B0844
@@ -7,7 +7,7 @@
  *   m_iHealth: +0xB8; m_lifeState: +0xB7; m_iTeamNum: +0xC0
  *   m_vecOrigin: +0x430; m_vecViewOffset: +0x124
  *
- * Runtime behavior (v1.3 trace-slot fix):
+ * Runtime behavior (v1.4 trace-slot fix):
  *   - Calls assist logic after every original CreateMove call with non-null cmd,
  *     regardless of the original function's bool return value.
  *   - Logs CreateMove results and the first eight trace outcomes to diagnose why
@@ -71,7 +71,7 @@
 #define CONTROL_PORT            28765
 #define CONTROL_MAX_REQUEST     8192
 #define TRACE_MASK_SHOT 0x46004003u /* Source MASK_SHOT: includes hitboxes */
-#define TRACE_RAY_VTABLE_SLOT 5u /* IEngineTrace: slot 4=ClipRayToCollideable, slot 5=TraceRay */
+#define TRACE_RAY_VTABLE_SLOT 4u /* IEngineTrace zero-based order: 3=ClipRayToCollideable, 4=TraceRay, 5=SetupLeafAndEntityListRay */
 
 static pthread_mutex_t g_log_lock = PTHREAD_MUTEX_INITIALIZER;
 static void *g_client_handle, *g_engine_handle;
@@ -240,10 +240,11 @@ static int resolve_interfaces(void) {
     Dl_info di; memset(&di, 0, sizeof(di));
     if (dladdr((void *)cf, &di) != 0) g_client_base = (uintptr_t)di.dli_fbase;
     g_interfaces_ready = 1;
-    log_line("INTERFACES_OK base=%p entityList=%p engine=%p trace=%p traceSlot4_clipRayToCollideable=%p traceSlot5_traceRay=%p traceRaySlot=%u rcTrace=%d localSlot=12 entitySlot=3",
+    log_line("INTERFACES_OK base=%p entityList=%p engine=%p trace=%p traceSlot3_clipRayToCollideable=%p traceSlot4_traceRay=%p traceSlot5_setupLeafAndEntityListRay=%p traceRaySlot=%u rcTrace=%d localSlot=12 entitySlot=3",
         (void *)g_client_base, g_entity_list, g_engine_client, g_engine_trace,
-        g_engine_trace ? vfunc(g_engine_trace, 4) : NULL,
-        (void *)g_trace_ray, TRACE_RAY_VTABLE_SLOT, e3);
+        g_engine_trace ? vfunc(g_engine_trace, 3) : NULL,
+        (void *)g_trace_ray, g_engine_trace ? vfunc(g_engine_trace, 5) : NULL,
+        TRACE_RAY_VTABLE_SLOT, e3);
     return 1;
 }
 
@@ -499,10 +500,10 @@ static void assist_command(void *cmd, float sample_time) {
 
     uint64_t now = now_ms();
     if (now - g_last_log_ms >= LOG_INTERVAL_MS || best_idx != g_last_target) {
-        log_line("FRAME local=%d hp=%d team=%d cmd=(%.2f,%.2f)->(%.2f,%.2f) scanned=%d visible=%d blocked=%d invalidTrace=%d selected=%d hit=%p fraction=%.4f error=%.2f aim=%d speed=%.2f magnet=%.2f fov=%.1f recoilControl=OFF",
+        log_line("FRAME local=%d hp=%d team=%d cmd=(%.2f,%.2f)->(%.2f,%.2f) scanned=%d visible=%d blocked=%d invalidTrace=%d selected=%d hit=%p fraction=%.4f error=%.2f aimApplied=%d aimEnabled=%d speed=%.2f magnet=%.2f fov=%.1f recoilControl=OFF",
             local_index, local_health, local_team, before_pitch, before_yaw, after_pitch, after_yaw,
             scanned, visible_count, blocked_count, invalid_trace_count, best_idx, best_hit,
-            best_fraction, best_error, aim_applied, cfg.speed, cfg.magnet, cfg.fov);
+            best_fraction, best_error, aim_applied, cfg.aim_enabled, cfg.speed, cfg.magnet, cfg.fov);
         log_line("TARGET_SCAN highest=%d maxClients=%d trace=%p target=%p health=%d team=%d point=(%.1f,%.1f,%.1f) targetAngle=(%.2f,%.2f) pointSource=origin+viewOffset headBone=UNVERIFIED visibilityRule=hit_must_equal_target",
             highest, max_clients, (void *)g_trace_ray, best_ent, best_health, best_team,
             best_target[0], best_target[1], best_target[2], best_angles[0], best_angles[1]);
@@ -748,7 +749,7 @@ static int install_create_move_hook(void) {
         log_line("HOOK_WARN restore_rx errno=%d", errno);
     __sync_synchronize();
     g_hook_installed = 1;
-    log_line("HOOK_OK target=libclient.so+0x8B0844 targetVA=%p trampoline=%p mode=STRICT_VISIBLE_HEAD_ASSIST_NO_RCS_V1_3_TRACE_SLOT5",
+    log_line("HOOK_OK target=libclient.so+0x8B0844 targetVA=%p trampoline=%p mode=STRICT_VISIBLE_HEAD_ASSIST_NO_RCS_V1_4_TRACE_SLOT4",
         target, tramp);
     return 1;
 }
@@ -756,7 +757,7 @@ static int install_create_move_hook(void) {
 static void *worker(void *unused) {
     (void)unused;
     RuntimeConfig c = config_snapshot();
-    log_line("START pid=%ld mode=STRICT_VISIBLE_HEAD_ASSIST_NO_RCS_V1_3_TRACE_SLOT5 aim=%d radar=%d speed=%.2f magnet=%.2f fov=%.1f controlPort=%d traceMask=0x%X",
+    log_line("START pid=%ld mode=STRICT_VISIBLE_HEAD_ASSIST_NO_RCS_V1_4_TRACE_SLOT4 aim=%d radar=%d speed=%.2f magnet=%.2f fov=%.1f controlPort=%d traceMask=0x%X",
         (long)getpid(), c.aim_enabled, c.radar_enabled, c.speed, c.magnet, c.fov, CONTROL_PORT, TRACE_MASK_SHOT);
     for (int i = 0; i < 240; ++i) {
         if (resolve_interfaces()) {
