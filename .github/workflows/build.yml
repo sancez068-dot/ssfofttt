@@ -1,0 +1,61 @@
+name: Build KM14 Control Panel + Native
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android packages
+        run: |
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;27.2.12479018" \
+            "cmake;3.22.1"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK and native library
+        run: gradle --no-daemon --stacktrace assembleDebug
+
+      - name: Package outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/KM14-Control-Panel.apk
+          unzip -p dist/KM14-Control-Panel.apk lib/arm64-v8a/liblogger.so > dist/liblogger.so
+          cp README.md dist/README.md
+          (cd dist && zip -9 KM14-Control-Panel-Bundle.zip KM14-Control-Panel.apk liblogger.so README.md)
+          ls -lh dist/*
+
+      - name: Upload APK + native bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: KM14-Control-Panel-Bundle
+          path: dist/KM14-Control-Panel-Bundle.zip
+          if-no-files-found: error
+          retention-days: 14
