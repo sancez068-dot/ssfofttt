@@ -10,8 +10,8 @@ android {
         applicationId 'com.xcode.km14panel'
         minSdk 23
         targetSdk 28
-        versionCode 1
-        versionName '1.0.0'
+        versionCode 25
+        versionName '2.5.0'
 
     }
 

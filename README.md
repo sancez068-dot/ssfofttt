@@ -1,5 +1,3 @@
-# KM14 Panel V2.4 — APK only
+# KM14 Panel V2.5 — APK only
 
-Root-level Android project for building the floating control panel APK through GitHub Actions. No native `.c` sources or `.so` library are included or compiled.
-
-See `README_APK_ONLY.txt` for deployment and artifact instructions.
+See `README_APK_ONLY.txt`. This root-level Android project builds the panel APK only; native C/C++ and `.so` files are deliberately separate.

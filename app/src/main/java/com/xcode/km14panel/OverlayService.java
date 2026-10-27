@@ -7,6 +7,10 @@ import android.app.Service;
 import android.content.Intent;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.RectF;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.PixelFormat;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -20,12 +24,14 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.LinearLayout;
+import android.widget.CompoundButton;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.Switch;
 import android.widget.TextView;
 
 import org.json.JSONObject;
+import org.json.JSONArray;
 
 import java.io.BufferedReader;
 import java.io.InputStream;
@@ -59,11 +65,18 @@ public final class OverlayService extends Service {
     private final ScheduledExecutorService io = Executors.newSingleThreadScheduledExecutor();
     private ScheduledFuture<?> pendingPush;
     private ScheduledFuture<?> pollTask;
+    private ScheduledFuture<?> visualPollTask;
+    private final ScheduledExecutorService visualIo = Executors.newSingleThreadScheduledExecutor();
     private WindowManager wm;
     private WindowManager.LayoutParams params;
     private View activeWindow;
     private View expandedWindow;
     private View collapsedWindow;
+    private VisualOverlayView visualOverlay;
+    private WindowManager.LayoutParams visualParams;
+    private LinearLayout collapsedPill;
+    private TextView collapsedDot;
+    private TextView collapsedLabel;
     private boolean collapsed;
     private boolean attached;
     private boolean applyingRemote;
@@ -72,6 +85,10 @@ public final class OverlayService extends Service {
 
     private Switch aimSwitch;
     private Switch radarSwitch;
+    private Switch boxesSwitch;
+    private Switch targetLineSwitch;
+    private Switch shotTrailSwitch;
+    private Switch hideCollapsedIconSwitch;
     private SeekBar speedSeek;
     private SeekBar magnetSeek;
     private SeekBar fovSeek;
@@ -91,8 +108,10 @@ public final class OverlayService extends Service {
             return;
         }
         buildWindows();
+        addVisualOverlay();
         showExpanded();
         pollTask = io.scheduleAtFixedRate(this::pollState, 0, 1400, TimeUnit.MILLISECONDS);
+        visualPollTask = visualIo.scheduleAtFixedRate(this::pollVisuals, 0, 100, TimeUnit.MILLISECONDS);
     }
 
     @Override
@@ -198,20 +217,38 @@ public final class OverlayService extends Service {
         content.setOrientation(LinearLayout.VERTICAL);
         scroll.addView(content, new ScrollView.LayoutParams(-1, -2));
 
-        LinearLayout toggles = section();
-        toggles.addView(sectionTitle("МОДУЛИ"), margins(0, 0, 0, 4));
+        LinearLayout aimSection = addFoldSection(content, "A  ·  AIM ASSIST", true);
         aimSwitch = createSwitch();
-        radarSwitch = createSwitch();
-        toggles.addView(switchRow("Aim Assist", aimSwitch));
-        toggles.addView(switchRow("Radar", radarSwitch));
-        content.addView(toggles, margins(0, 0, 0, 9));
+        aimSection.addView(switchRow("Aim Assist", aimSwitch));
+        TextView weaponRule = text("Ограничение встроено: неизвестное оружие, ножи и гранаты блокируют наведение.", 10, false, MUTED);
+        weaponRule.setPadding(0, dp(2), 0, dp(5));
+        aimSection.addView(weaponRule, new LinearLayout.LayoutParams(-1, -2));
+        speedSeek = addSlider(aimSection, "Скорость", "9.11", 2990, 901, 0);
+        magnetSeek = addSlider(aimSection, "Магнит", "0.70", 100, 70, 1);
+        fovSeek = addSlider(aimSection, "FOV", "11.0°", 3590, 100, 2);
 
-        LinearLayout settings = section();
-        settings.addView(sectionTitle("НАСТРОЙКИ НАВЕДЕНИЯ"), margins(0, 0, 0, 8));
-        speedSeek = addSlider(settings, "Скорость", "9.11", 2990, 901, 0);
-        magnetSeek = addSlider(settings, "Магнит", "0.70", 100, 70, 1);
-        fovSeek = addSlider(settings, "FOV", "11.0°", 3590, 100, 2);
-        content.addView(settings, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout visualSection = addFoldSection(content, "E  ·  ESP / VISUALS", true);
+        boxesSwitch = createSwitch();
+        targetLineSwitch = createSwitch();
+        shotTrailSwitch = createSwitch();
+        visualSection.addView(switchRow("Боксы противников", boxesSwitch));
+        visualSection.addView(switchRow("Линия к ближайшей цели", targetLineSwitch));
+        visualSection.addView(switchRow("Следы выстрелов (только экран)", shotTrailSwitch));
+        TextView visualNote = text("Отрисовка идёт отдельным прозрачным overlay и видна только на этом устройстве. Нужна совместимая нативка.", 10, false, MUTED);
+        visualNote.setPadding(0, dp(5), 0, dp(2));
+        visualSection.addView(visualNote, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout radarSection = addFoldSection(content, "R  ·  RADAR", true);
+        radarSwitch = createSwitch();
+        radarSection.addView(switchRow("Radar / spotted flags", radarSwitch));
+
+        LinearLayout uiSection = addFoldSection(content, "U  ·  INTERFACE", false);
+        hideCollapsedIconSwitch = createSwitch();
+        hideCollapsedIconSwitch.setChecked(getSharedPreferences("km14_panel_ui", MODE_PRIVATE).getBoolean("hide_collapsed_icon", false));
+        uiSection.addView(switchRow("Скрыть значок свёрнутой панели", hideCollapsedIconSwitch));
+        TextView uiNote = text("Область нажатия сохранится: коснись места, где был значок, чтобы снова открыть панель.", 10, false, MUTED);
+        uiNote.setPadding(0, dp(5), 0, dp(2));
+        uiSection.addView(uiNote, new LinearLayout.LayoutParams(-1, -2));
 
         TextView footer = text("Перетаскивай за заголовок. Изменения применяются сразу при подключённой нативке.", 10, false, MUTED);
         footer.setLineSpacing(dp(1), 1.0f);
@@ -231,27 +268,70 @@ public final class OverlayService extends Service {
 
     private View buildCollapsed() {
         LinearLayout pill = new LinearLayout(this);
+        collapsedPill = pill;
         pill.setGravity(Gravity.CENTER);
         pill.setOrientation(LinearLayout.HORIZONTAL);
         pill.setPadding(dp(10), dp(7), dp(10), dp(7));
         pill.setBackground(rounded(Color.rgb(24, 32, 47), 18, ACCENT));
         pill.setElevation(dp(12));
-        TextView dot = text("●", 12, true, GREEN);
-        TextView label = text(" KM14", 14, true, TEXT);
-        pill.addView(dot, new LinearLayout.LayoutParams(-2, -2));
-        pill.addView(label, new LinearLayout.LayoutParams(-2, -2));
+        collapsedDot = text("●", 12, true, GREEN);
+        collapsedLabel = text(" KM14", 14, true, TEXT);
+        pill.addView(collapsedDot, new LinearLayout.LayoutParams(-2, -2));
+        pill.addView(collapsedLabel, new LinearLayout.LayoutParams(-2, -2));
         pill.setOnClickListener(v -> showExpanded());
         pill.setTag(pill);
+        applyCollapsedIconVisibility();
         return pill;
     }
 
     private void wireListeners() {
-        aimSwitch.setOnCheckedChangeListener((button, checked) -> {
+        CompoundButton.OnCheckedChangeListener configListener = (button, checked) -> {
             if (!applyingRemote) edited();
+        };
+        aimSwitch.setOnCheckedChangeListener(configListener);
+        radarSwitch.setOnCheckedChangeListener(configListener);
+        boxesSwitch.setOnCheckedChangeListener(configListener);
+        targetLineSwitch.setOnCheckedChangeListener(configListener);
+        shotTrailSwitch.setOnCheckedChangeListener(configListener);
+        hideCollapsedIconSwitch.setOnCheckedChangeListener((button, checked) -> {
+            getSharedPreferences("km14_panel_ui", MODE_PRIVATE).edit().putBoolean("hide_collapsed_icon", checked).apply();
+            applyCollapsedIconVisibility();
         });
-        radarSwitch.setOnCheckedChangeListener((button, checked) -> {
-            if (!applyingRemote) edited();
+    }
+
+    private LinearLayout addFoldSection(LinearLayout parent, String title, boolean open) {
+        LinearLayout group = new LinearLayout(this);
+        group.setOrientation(LinearLayout.VERTICAL);
+        TextView heading = sectionTitle((open ? "▾  " : "▸  ") + title);
+        heading.setPadding(dp(5), dp(7), dp(5), dp(6));
+        LinearLayout body = section();
+        body.setVisibility(open ? View.VISIBLE : View.GONE);
+        heading.setOnClickListener(v -> {
+            boolean expand = body.getVisibility() != View.VISIBLE;
+            body.setVisibility(expand ? View.VISIBLE : View.GONE);
+            heading.setText((expand ? "▾  " : "▸  ") + title);
         });
+        group.addView(heading, new LinearLayout.LayoutParams(-1, -2));
+        group.addView(body, new LinearLayout.LayoutParams(-1, -2));
+        parent.addView(group, margins(0, 0, 0, 5));
+        return body;
+    }
+
+    private void applyCollapsedIconVisibility() {
+        if (collapsedPill == null || collapsedDot == null || collapsedLabel == null) return;
+        boolean hide = getSharedPreferences("km14_panel_ui", MODE_PRIVATE).getBoolean("hide_collapsed_icon", false);
+        collapsedDot.setVisibility(hide ? View.GONE : View.VISIBLE);
+        collapsedLabel.setVisibility(hide ? View.GONE : View.VISIBLE);
+        if (hide) {
+            collapsedPill.setBackground(new ColorDrawable(Color.TRANSPARENT));
+            collapsedPill.setPadding(0, 0, 0, 0);
+            collapsedPill.setElevation(0f);
+        } else {
+            collapsedPill.setBackground(rounded(Color.rgb(24, 32, 47), 18, ACCENT));
+            collapsedPill.setPadding(dp(10), dp(7), dp(10), dp(7));
+            collapsedPill.setElevation(dp(12));
+        }
+        collapsedPill.invalidate();
     }
 
     private Switch createSwitch() {
@@ -433,6 +513,9 @@ public final class OverlayService extends Service {
         try {
             body.put("aim_enabled", aimSwitch.isChecked());
             body.put("radar_enabled", radarSwitch.isChecked());
+            body.put("boxes_enabled", boxesSwitch.isChecked());
+            body.put("target_line_enabled", targetLineSwitch.isChecked());
+            body.put("shot_trails_enabled", shotTrailSwitch.isChecked());
             body.put("speed", 0.10f + speedSeek.getProgress() * 0.01f);
             body.put("magnet", magnetSeek.getProgress() / 100.0f);
             body.put("fov", 1.0f + fovSeek.getProgress() * 0.1f);
@@ -490,6 +573,9 @@ public final class OverlayService extends Service {
         try {
             aimSwitch.setChecked(state.optBoolean("aim_enabled", true));
             radarSwitch.setChecked(state.optBoolean("radar_enabled", true));
+            boxesSwitch.setChecked(state.optBoolean("boxes_enabled", false));
+            targetLineSwitch.setChecked(state.optBoolean("target_line_enabled", false));
+            shotTrailSwitch.setChecked(state.optBoolean("shot_trails_enabled", false));
             float speed = (float) state.optDouble("speed", 9.11);
             float magnet = (float) state.optDouble("magnet", 0.70);
             float fov = (float) state.optDouble("fov", 11.0);
@@ -498,6 +584,102 @@ public final class OverlayService extends Service {
             fovSeek.setProgress(clamp(Math.round((fov - 1.0f) * 10.0f), 0, 3590));
         } finally {
             applyingRemote = false;
+        }
+    }
+
+    private void addVisualOverlay() {
+        visualOverlay = new VisualOverlayView(this);
+        visualParams = new WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
+                overlayType(),
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT);
+        visualParams.gravity = Gravity.TOP | Gravity.START;
+        visualParams.setTitle("KM14 visual overlay");
+        try { wm.addView(visualOverlay, visualParams); } catch (Exception ignored) { visualOverlay = null; }
+    }
+
+    private void pollVisuals() {
+        try {
+            JSONObject state = request("GET", "/visuals", null);
+            if (state == null || !state.optBoolean("ok", false)) return;
+            VisualData data = VisualData.fromJson(state);
+            main.post(() -> { if (visualOverlay != null) visualOverlay.setData(data); });
+        } catch (Exception ignored) {
+            main.post(() -> { if (visualOverlay != null) visualOverlay.setData(VisualData.EMPTY); });
+        }
+    }
+
+    private static final class VisualData {
+        static final VisualData EMPTY = new VisualData(1, 1, new float[0][], new float[0][], new float[0][]);
+        final int width, height;
+        final float[][] boxes, lines, shots;
+        VisualData(int width, int height, float[][] boxes, float[][] lines, float[][] shots) {
+            this.width = Math.max(1, width); this.height = Math.max(1, height);
+            this.boxes = boxes; this.lines = lines; this.shots = shots;
+        }
+        static VisualData fromJson(JSONObject o) {
+            return new VisualData(o.optInt("width", 1), o.optInt("height", 1),
+                    readArrays(o.optJSONArray("boxes"), 5),
+                    readArrays(o.optJSONArray("lines"), 4),
+                    readArrays(o.optJSONArray("shots"), 5));
+        }
+        private static float[][] readArrays(JSONArray array, int width) {
+            if (array == null) return new float[0][];
+            int n = Math.min(array.length(), 64);
+            float[][] result = new float[n][];
+            int used = 0;
+            for (int i = 0; i < n; i++) {
+                JSONArray row = array.optJSONArray(i);
+                if (row == null || row.length() < width) continue;
+                float[] item = new float[width];
+                boolean valid = true;
+                for (int j = 0; j < width; j++) {
+                    double v = row.optDouble(j, Double.NaN);
+                    if ((Double.isNaN(v) || Double.isInfinite(v)) || Math.abs(v) > 100000.0) { valid = false; break; }
+                    item[j] = (float) v;
+                }
+                if (valid) result[used++] = item;
+            }
+            float[][] compact = new float[used][];
+            System.arraycopy(result, 0, compact, 0, used);
+            return compact;
+        }
+    }
+
+    private static final class VisualOverlayView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private volatile VisualData data = VisualData.EMPTY;
+        VisualOverlayView(android.content.Context context) { super(context); setLayerType(View.LAYER_TYPE_HARDWARE, null); }
+        void setData(VisualData value) { data = value == null ? VisualData.EMPTY : value; invalidate(); }
+        @Override protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            VisualData d = data;
+            float sx = getWidth() / (float) d.width;
+            float sy = getHeight() / (float) d.height;
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(Math.max(2f, getResources().getDisplayMetrics().density * 1.35f));
+            for (float[] b : d.boxes) {
+                boolean target = b[4] > 0.5f;
+                paint.setColor(target ? Color.rgb(255, 190, 90) : Color.rgb(85, 210, 255));
+                float left = b[0] * sx, top = b[1] * sy, right = b[2] * sx, bottom = b[3] * sy;
+                if (right > left && bottom > top) canvas.drawRect(new RectF(left, top, right, bottom), paint);
+            }
+            for (float[] line : d.lines) {
+                paint.setColor(Color.rgb(255, 190, 90));
+                paint.setStrokeWidth(Math.max(2f, getResources().getDisplayMetrics().density * 1.6f));
+                canvas.drawLine(line[0] * sx, line[1] * sy, line[2] * sx, line[3] * sy, paint);
+            }
+            for (float[] shot : d.shots) {
+                float age = Math.max(0f, Math.min(1f, shot[4] / 900f));
+                paint.setColor(Color.argb((int)(220 * (1f - age)), 255, 225, 105));
+                paint.setStrokeWidth(Math.max(2f, getResources().getDisplayMetrics().density * 1.8f));
+                canvas.drawLine(shot[0] * sx, shot[1] * sy, shot[2] * sx, shot[3] * sy, paint);
+            }
         }
     }
 
@@ -547,7 +729,12 @@ public final class OverlayService extends Service {
             if (pendingPush != null) pendingPush.cancel(false);
         }
         if (pollTask != null) pollTask.cancel(true);
+        if (visualPollTask != null) visualPollTask.cancel(true);
         io.shutdownNow();
+        visualIo.shutdownNow();
+        try {
+            if (visualOverlay != null) wm.removeView(visualOverlay);
+        } catch (Exception ignored) { }
         try {
             if (activeWindow != null && attached) wm.removeView(activeWindow);
         } catch (Exception ignored) { }
